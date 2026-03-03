@@ -33,7 +33,6 @@ import com.example.beta_bans.ui.theme.BetaBansTheme
 
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector
-import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector.createFromOptions
 import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector.ObjectDetectorOptions
 import java.util.concurrent.Executors
 import com.google.mediapipe.tasks.core.BaseOptions
@@ -68,6 +67,10 @@ private fun setupObjectDetector(context: Context) {
         .setRunningMode(RunningMode.LIVE_STREAM)
         .setResultListener { result, image ->
             Log.d("Detection", "Found ${result.detections().size} objects")
+            for (detect in result.detections()) {
+                Log.d("Detection", "    ${detect.categories()}")
+                Log.d("Detection", "    ${detect}")
+            }
         }
         .setErrorListener { error ->
             Log.e("Detection", "MediaPipe Error: ${error.message}")
