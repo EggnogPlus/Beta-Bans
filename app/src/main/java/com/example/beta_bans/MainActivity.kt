@@ -1,6 +1,7 @@
 package com.example.beta_bans
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.util.Log
@@ -8,7 +9,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.core.CameraSelector
+import androidx.annotation.OptIn
+import androidx.camera.core.ExperimentalGetImage
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -23,11 +26,19 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.example.beta_bans.ui.theme.BetaBansTheme
+
+import com.google.mediapipe.tasks.vision.core.RunningMode
+import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector
+import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector.createFromOptions
+import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector.ObjectDetectorOptions
+import java.util.concurrent.Executors
+import com.google.mediapipe.tasks.core.BaseOptions
+
+private var objectDetector: ObjectDetector? = null
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -43,6 +54,27 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+}
+
+private fun setupObjectDetector(context: Context) {
+
+    val baseOptionsBuilder = BaseOptions.builder()
+        .setModelAssetPath("efficientdet_lite0.tflite")
+
+    val optionsBuilder = ObjectDetectorOptions.builder()
+        .setBaseOptions(baseOptionsBuilder.build())
+        .setScoreThreshold(0.5f)
+        .setMaxResults(5)
+        .setRunningMode(RunningMode.LIVE_STREAM)
+        .setResultListener { result, image ->
+            Log.d("Detection", "Found ${result.detections().size} objects")
+        }
+        .setErrorListener { error ->
+            Log.e("Detection", "MediaPipe Error: ${error.message}")
+        }
+
+    val options = optionsBuilder.build()
+    objectDetector = ObjectDetector.createFromOptions(context, options)
 }
 
 @Composable
@@ -66,6 +98,8 @@ fun CameraScreen() {
 
     LaunchedEffect(Unit) {
         launcher.launch(Manifest.permission.CAMERA)
+        // Initialize the Model
+        setupObjectDetector(context)
     }
 
     if (hasCameraPermission) {
@@ -92,9 +126,10 @@ fun CameraScreen() {
     }
 }
 
+@OptIn(ExperimentalGetImage::class)
 @Composable
 fun CameraPreview(cameraIndex: Int, onCameraCountReady: (Int) -> Unit) {
-    val lifecycleOwner = LocalLifecycleOwner.current
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     val context = LocalContext.current
     val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
 
@@ -120,12 +155,33 @@ fun CameraPreview(cameraIndex: Int, onCameraCountReady: (Int) -> Unit) {
                         it.setSurfaceProvider(previewView.surfaceProvider)
                     }
 
+                    // OBJECT DETECTION
+
+                    if (objectDetector == null) {
+                        setupObjectDetector(context)
+                    }
+
+                    // 2. Setup Analysis (The connection to MediaPipe)
+                    val analysis = ImageAnalysis.Builder()
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                        .build()
+
+                    analysis.setAnalyzer(Executors.newSingleThreadExecutor()) { imageProxy ->
+                        imageProxy.image?.let { mediaImage ->
+                            val mpImage = com.google.mediapipe.framework.image.MediaImageBuilder(mediaImage).build()
+                            objectDetector?.detectAsync(mpImage, System.currentTimeMillis())
+                        }
+                        imageProxy.close()
+                    }
+
                     try {
                         cameraProvider.unbindAll()
                         cameraProvider.bindToLifecycle(
                             lifecycleOwner,
                             cameraSelector,
-                            preview
+                            preview,
+                            analysis
                         )
                     } catch (e: Exception) {
                         Log.e("CameraApp", "Binding failed", e)

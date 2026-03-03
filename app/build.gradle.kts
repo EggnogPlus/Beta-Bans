@@ -37,6 +37,16 @@ android {
     buildFeatures {
         compose = true
     }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+    }
+
+    androidResources {
+        noCompress.add("tflite")
+    }
 }
 
 dependencies {
@@ -57,9 +67,10 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.test.manifest)
 
     // CameraX Essential Dependencies
-    val camerax_version = "1.3.4"
-    implementation("androidx.camera:camera-core:$camerax_version")
-    implementation("androidx.camera:camera-camera2:$camerax_version")
-    implementation("androidx.camera:camera-lifecycle:$camerax_version")
-    implementation("androidx.camera:camera-view:$camerax_version")
+    implementation("androidx.camera:camera-core:latest.release")
+    implementation("androidx.camera:camera-camera2:latest.release")
+    implementation("androidx.camera:camera-lifecycle:latest.release")
+    implementation("androidx.camera:camera-view:latest.release")
+    // Mediapipe Vision
+    implementation("com.google.mediapipe:tasks-vision:0.10.14")
 }
