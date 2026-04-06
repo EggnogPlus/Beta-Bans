@@ -23,6 +23,8 @@ This Repository is provided "as is", without warranties of any kind.
 
 package humer.UvcCamera;
 
+import static java.lang.Integer.parseInt;
+
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.PendingIntent;
@@ -42,9 +44,6 @@ import android.hardware.usb.UsbRequest;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
-import android.support.annotation.RequiresApi;
-import android.support.constraint.ConstraintLayout;
-import android.support.v4.content.LocalBroadcastManager;
 import android.text.TextUtils;
 import android.util.Log;
 import android.view.ContextThemeWrapper;
@@ -58,10 +57,11 @@ import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.Toast;
 
+import androidx.annotation.RequiresApi;
+import androidx.constraintlayout.widget.ConstraintLayout;
+
 import com.crowdfire.cfalertdialog.CFAlertDialog;
 import com.crowdfire.cfalertdialog.views.CFPushButton;
-import com.sun.jna.Pointer;
-import com.tomer.fadingtextview.FadingTextView;
 
 import java.io.ByteArrayOutputStream;
 import java.io.FileOutputStream;
@@ -79,9 +79,6 @@ import humer.UvcCamera.UVC_Descriptor.UVC_Descriptor;
 import humer.UvcCamera.UsbIso64.USBIso;
 import humer.UvcCamera.UsbIso64.usbdevice_fs_util;
 import noman.zoomtextview.ZoomTextView;
-
-import static java.lang.Integer.parseInt;
-import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 public class SetUpTheUsbDeviceUsbIso extends Activity {
     // USB codes:

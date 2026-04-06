@@ -23,6 +23,9 @@ This Repository is provided "as is", without warranties of any kind.
 
 package humer.UvcCamera;
 
+import static java.lang.Integer.parseInt;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
+
 import android.app.Activity;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
@@ -46,9 +49,6 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
 import android.provider.MediaStore;
-import android.support.annotation.RequiresApi;
-import android.support.constraint.ConstraintLayout;
-import android.support.v4.content.LocalBroadcastManager;
 import android.text.TextUtils;
 import android.util.Log;
 import android.view.ContextThemeWrapper;
@@ -61,15 +61,17 @@ import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.Toast;
 
+import androidx.annotation.RequiresApi;
+import androidx.constraintlayout.widget.ConstraintLayout;
+import androidx.localbroadcastmanager.content.LocalBroadcastManager;
+
 import com.crowdfire.cfalertdialog.CFAlertDialog;
 import com.crowdfire.cfalertdialog.views.CFPushButton;
 import com.serenegiant.usb.IFrameCallback;
 import com.sun.jna.Pointer;
-import com.sun.jna.Structure;
 import com.tomer.fadingtextview.FadingTextView;
 
 import java.io.File;
-import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -78,15 +80,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
 
 import humer.UvcCamera.JNA_I_LibUsb.JNA_I_LibUsb;
 import humer.UvcCamera.UVC_Descriptor.UVC_Descriptor;
 import noman.zoomtextview.ZoomTextView;
-
-import static java.lang.Integer.parseInt;
-import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 public class SetUpTheUsbDeviceUvc extends Activity {
 

@@ -37,13 +37,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.ParcelFileDescriptor;
 import android.preference.PreferenceManager;
-import android.support.annotation.Nullable;
-import android.support.annotation.RequiresApi;
-import android.support.v4.app.ActivityCompat;
-import android.support.v4.content.ContextCompat;
-import android.support.v7.app.AppCompatActivity;
 import android.util.Log;
-//import android.view.Surface;
 import android.view.View;
 import android.widget.Button;
 import android.widget.CompoundButton;
@@ -54,9 +48,13 @@ import android.widget.ScrollView;
 import android.widget.Toast;
 import android.widget.ToggleButton;
 
+import androidx.annotation.Nullable;
+import androidx.annotation.RequiresApi;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
+
 import com.freeapps.hosamazzam.androidchangelanguage.MyContextWrapper;
-//import com.sun.jna.Pointer;
-//import com.sun.jna.Structure;
 
 import java.io.BufferedReader;
 import java.io.FileNotFoundException;
@@ -68,7 +66,6 @@ import java.text.DecimalFormat;
 import java.text.NumberFormat;
 import java.util.Locale;
 
-//import humer.UvcCamera.JNA_I_LibUsb.JNA_I_LibUsb;
 import noman.zoomtextview.ZoomTextView;
 
 public class Main extends AppCompatActivity {

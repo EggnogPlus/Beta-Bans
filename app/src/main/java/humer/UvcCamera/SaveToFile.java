@@ -28,10 +28,7 @@ import android.content.Context;
 import android.content.DialogInterface;
 import android.graphics.Color;
 import android.os.Build;
-
 import android.os.Handler;
-import android.support.constraint.ConstraintLayout;
-import android.support.design.widget.TextInputLayout;
 import android.text.InputType;
 import android.text.SpannableString;
 import android.text.SpannableStringBuilder;
@@ -47,9 +44,11 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.ToggleButton;
 
+import androidx.constraintlayout.widget.ConstraintLayout;
+
 import com.crowdfire.cfalertdialog.CFAlertDialog;
 import com.crowdfire.cfalertdialog.views.CFPushButton;
-import com.sun.jna.Pointer;
+import com.google.android.material.textfield.TextInputLayout;
 import com.tomer.fadingtextview.FadingTextView;
 
 import java.io.File;
