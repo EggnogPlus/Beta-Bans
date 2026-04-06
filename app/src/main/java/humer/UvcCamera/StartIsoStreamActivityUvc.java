@@ -30,6 +30,7 @@ import android.graphics.PorterDuff;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
+import android.os.HandlerThread;
 import android.provider.MediaStore;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
@@ -81,6 +82,7 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
 import java.text.SimpleDateFormat;
 import java.util.Arrays;
 import java.util.Date;
@@ -107,7 +109,127 @@ import static java.lang.System.out;
 
 public class StartIsoStreamActivityUvc extends Activity {
 
+    //region BetaBans Vars/Methods
 
+    private org.tensorflow.lite.Interpreter tflite;
+    private HandlerThread aiThread;
+    private Handler aiHandler;
+
+    private Bitmap mInputBitmap;
+    private Bitmap mResizedBitmap;
+    private byte[] midasBuffr;
+    private final IFrameCallback mFrameCallback = new IFrameCallback() {
+        @Override
+        public void onFrame(final byte[] frame) {
+            Log.d("BETABANS", "onFrame success");
+
+
+            synchronized(midasBuffr) {
+                System.arraycopy(frame, 0, midasBuffr, 0, frame.length);
+            }
+
+            aiHandler.post(() -> {
+                runMidasInference(midasBuffr);
+            });
+
+//            Old frame process
+//
+//            if (imageCapture || videorecord || videorecordApiJellyBeanNup) {
+//                try {
+//                    processReceivedVideoFrameYuv(frame, null);
+//                } catch (Exception e) {
+//                    e.printStackTrace();
+//                }
+//            }
+        }
+    };
+
+    private void setupAiThread() {
+        aiThread = new HandlerThread("MidasThread");
+        aiThread.start();
+        aiHandler = new Handler(aiThread.getLooper());
+    }
+
+    private void initMidas() {
+        try {
+            android.content.res.AssetFileDescriptor fileDescriptor = getAssets().openFd("Midas-V2.tflite");
+            java.io.FileInputStream inputStream = new java.io.FileInputStream(fileDescriptor.getFileDescriptor());
+            java.nio.channels.FileChannel fileChannel = inputStream.getChannel();
+            long startOffset = fileDescriptor.getStartOffset();
+            long declaredLength = fileDescriptor.getDeclaredLength();
+            java.nio.MappedByteBuffer modelBuffer = fileChannel.map(java.nio.channels.FileChannel.MapMode.READ_ONLY, startOffset, declaredLength);
+
+            tflite = new org.tensorflow.lite.Interpreter(modelBuffer);
+            Log.d("BETABANS", "MiDaS Model loaded successfully");
+        } catch (Exception e) {
+            Log.e("BETABANS", "Error loading model", e);
+        }
+    }
+
+    private java.nio.ByteBuffer convertBitmapToByteBuffer(Bitmap bitmap) {
+        // MiDaS-V2.1 = 256x256 | 4 bytes per float, 3 channels (RGB)
+        java.nio.ByteBuffer byteBuffer = java.nio.ByteBuffer.allocateDirect(4 * 256 * 256 * 3);
+        byteBuffer.order(java.nio.ByteOrder.nativeOrder());
+
+        int[] intValues = new int[256 * 256];
+        bitmap.getPixels(intValues, 0, bitmap.getWidth(), 0, 0, bitmap.getWidth(), bitmap.getHeight());
+
+        byteBuffer.rewind();
+        for (int pixelValue : intValues) {
+            byteBuffer.putFloat(((pixelValue >> 16) & 0xFF) / 255.0f);
+            byteBuffer.putFloat(((pixelValue >> 8) & 0xFF) / 255.0f);
+            byteBuffer.putFloat((pixelValue & 0xFF) / 255.0f);
+        }
+        return byteBuffer;
+    }
+
+    private void checkPathClear(float[][][] depthMap) {
+        // depthMap is [1][256][256]
+        // Check a 50x50 square in the center of the frame
+        float totalDepth = 0;
+        int count = 0;
+
+        for (int y = 103; y < 153; y++) {
+            for (int x = 103; x < 153; x++) {
+                totalDepth += depthMap[0][y][x];
+                count++;
+            }
+        }
+
+        float averageDepth = totalDepth / count;
+
+        if (averageDepth > 0.6f) {
+            Log.w("OBSTACLE", "Warning: Object detected at head height!");
+        }
+    }
+
+    private void runMidasInference(byte[] yuy2Frame) {
+        if (mInputBitmap == null || mInputBitmap.getWidth() != imageWidth) {
+            mInputBitmap = Bitmap.createBitmap(imageWidth, imageHeight, Bitmap.Config.ARGB_8888);
+            mResizedBitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888);
+        }
+        YUY2pixeltobmp(yuy2Frame, mInputBitmap, imageWidth, imageHeight);
+
+        // Resize to MiDaS input size (256x256)
+        android.graphics.Canvas canvas = new android.graphics.Canvas(mResizedBitmap);
+        android.graphics.Matrix matrix = new android.graphics.Matrix();
+        matrix.setScale(256f / imageWidth, 256f / imageHeight);
+        canvas.drawBitmap(mInputBitmap, matrix, null);
+
+        java.nio.ByteBuffer inputBuffer = convertBitmapToByteBuffer(mResizedBitmap);
+
+        float[][][] outputDepthMap = new float[1][256][256];
+        if (tflite != null) {
+            tflite.run(inputBuffer, outputDepthMap);
+
+            checkPathClear(outputDepthMap);
+        }
+    }
+
+    //endregion
+
+
+    //region Forked Vars
     // Native UVC Camera
     private long mNativePtr;
     private int connected_to_camera;
@@ -278,7 +400,7 @@ public class StartIsoStreamActivityUvc extends Activity {
     private BitmapToVideoEncoder bitmapToVideoEncoder;
     private File saveDir;
 
-
+    //endregion
 
 
 
@@ -307,7 +429,21 @@ public class StartIsoStreamActivityUvc extends Activity {
     protected void onStart() {
         super.onStart();
         Log.v("STATE", "onStart() is called");
+        setupAiThread();
+        initMidas();
+    }
 
+    private void quickStartGC0307() {
+        // Hardcoded working values for the GC0307 sensor
+        this.imageWidth = 640;
+        this.imageHeight = 480;
+        this.videoformat = "YUY2";
+        this.camFormatIndex = 1;
+        this.camFrameIndex = 1;
+        this.camFrameInterval = 333333; // 30 FPS
+
+        // Start the stream
+        isoStream(null);
     }
 
     @Override
@@ -857,6 +993,7 @@ public class StartIsoStreamActivityUvc extends Activity {
                 ////////////////////////////////    MJPEG   /////////////////////////////
                 if (videoformat.equals("MJPEG")) {
                     ////////////////////////////////    MJPEG   /////////////////////////////
+                    /////////////////////    !NOT ADAFRUIT VIDEO FORMAT!   //////////////////
 
                     int result = -1;
                     mPreviewSurface = mUVCCameraView.getHolder().getSurface();
@@ -925,6 +1062,13 @@ public class StartIsoStreamActivityUvc extends Activity {
                     ////////////////////////////////    YUY2   /////////////////////////////
                 } else if (videoformat.equals("YUY2") || (videoformat.equals("UYVY"))) {
                     ////////////////////////////////    YUY2   /////////////////////////////
+                    //////////////////////    !ADAFRUIT VIDEO FORMAT!   ////////////////////
+                    Log.d("BETABANS", "Entered YUY2 block successfully - Initializing MiDas Buffer");
+
+                    if (midasBuffr == null || midasBuffr.length != (imageWidth * imageHeight * 2)) {
+                        midasBuffr = new byte[imageWidth * imageHeight * 2];
+                    }
+
 
                     int result = -1;
                     //mUVCCameraView.getHolder().setFixedSize(imageHeight,imageWidth);
@@ -953,23 +1097,7 @@ public class StartIsoStreamActivityUvc extends Activity {
                         mUVCCameraView.getHolder().setFixedSize(displaymetrics.widthPixels, displaymetrics.heightPixels);
                         surface_scaled = false;
                     }
-                    result = PreviewPrepareStream(mNativePtr, mPreviewSurface, new IFrameCallback() {
-                        @Override
-                        public void onFrame(final byte[] frame) {
-                            log("imageCapture = "+imageCapture +"\nvideorecord = "+ videorecord);
-                            if (imageCapture || videorecord || videorecordApiJellyBeanNup) {
-                                int ret = -1;
-                                //log ("Frame Callback:\nFramelength = " + frame.length);
-                                try {
-                                    ret = processReceivedVideoFrameYuv(frame, null);
-                                } catch (Exception e) {
-                                    e.printStackTrace();
-                                }
-                                if (ret != 0) log("FAILURE !! \n!!   --> processReceivedVideoFrameYuv Method returned -1\n!!!!!! ");
-                            }
-                        }
-                    }
-                    );
+                    result = PreviewPrepareStream(mNativePtr, mPreviewSurface, mFrameCallback);
                     if (result == 0) {
                         result = PreviewStartStream(mNativePtr);
                         if (result == 0) {
