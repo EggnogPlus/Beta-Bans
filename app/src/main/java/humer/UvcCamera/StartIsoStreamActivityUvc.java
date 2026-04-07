@@ -21,27 +21,24 @@ This Repository is provided "as is", without warranties of any kind.
 
 package humer.UvcCamera;
 
-import android.app.Activity;
+import static java.lang.Integer.parseInt;
+import static java.lang.System.out;
 
-import android.content.ContentValues;
-import android.graphics.Canvas;
-import android.graphics.Color;
-import android.graphics.PorterDuff;
-import android.net.Uri;
-import android.os.Build;
-import android.os.Environment;
-import android.os.HandlerThread;
-import android.provider.MediaStore;
+import android.app.Activity;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
+import android.graphics.Color;
 import android.graphics.ImageFormat;
 import android.graphics.Matrix;
+import android.graphics.PorterDuff;
 import android.graphics.Rect;
 import android.graphics.YuvImage;
 import android.hardware.usb.UsbConstants;
@@ -51,8 +48,13 @@ import android.hardware.usb.UsbEndpoint;
 import android.hardware.usb.UsbInterface;
 import android.hardware.usb.UsbManager;
 import android.media.MediaPlayer;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
+import android.os.HandlerThread;
+import android.provider.MediaStore;
 import android.text.TextUtils;
 import android.util.DisplayMetrics;
 import android.util.Log;
@@ -76,25 +78,26 @@ import android.widget.TextView;
 import android.widget.Toast;
 import android.widget.ToggleButton;
 
+import com.crowdfire.cfalertdialog.CFAlertDialog;
+import com.mingle.sweetpick.CustomDelegate;
+import com.mingle.sweetpick.SweetSheet;
+import com.sample.timelapse.MJPEGGenerator;
+import com.serenegiant.usb.IFrameCallback;
+import com.sun.jna.Pointer;
+
+import org.apache.commons.io.IOUtils;
+
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
-import java.nio.ByteBuffer;
 import java.text.SimpleDateFormat;
 import java.util.Arrays;
 import java.util.Date;
 import java.util.Formatter;
 import java.util.HashMap;
-
-import com.crowdfire.cfalertdialog.CFAlertDialog;
-import com.mingle.sweetpick.CustomDelegate;
-import com.mingle.sweetpick.SweetSheet;
-import com.sample.timelapse.MJPEGGenerator ;
-import com.serenegiant.usb.IFrameCallback;
-import com.sun.jna.Pointer;
 
 import humer.UvcCamera.JNA_I_LibUsb.JNA_I_LibUsb;
 import humer.UvcCamera.UVC_Descriptor.IUVC_Descriptor;
@@ -102,14 +105,17 @@ import humer.UvcCamera.UsbIso64.usbdevice_fs_util;
 import io.github.yavski.fabspeeddial.FabSpeedDial;
 import io.github.yavski.fabspeeddial.SimpleMenuListenerAdapter;
 
-import org.apache.commons.io.IOUtils;
-
-import static java.lang.Integer.parseInt;
-import static java.lang.System.out;
-
 public class StartIsoStreamActivityUvc extends Activity {
 
     //region BetaBans Vars/Methods
+
+//    Log Cheatsheet
+//    Log.v(); // Verbose
+//    Log.d(); // Debug
+//    Log.i(); // Info
+//    Log.w(); // Warning
+//    Log.e(); // Error
+
 
     private org.tensorflow.lite.Interpreter tflite;
     private HandlerThread aiThread;
@@ -121,8 +127,7 @@ public class StartIsoStreamActivityUvc extends Activity {
     private final IFrameCallback mFrameCallback = new IFrameCallback() {
         @Override
         public void onFrame(final byte[] frame) {
-            Log.d("BETABANS", "onFrame success");
-
+            Log.d("BETABANS", "onFrame");
 
             synchronized(midasBuffr) {
                 System.arraycopy(frame, 0, midasBuffr, 0, frame.length);
@@ -145,12 +150,14 @@ public class StartIsoStreamActivityUvc extends Activity {
     };
 
     private void setupAiThread() {
+        Log.i("BETABANS", "setupAiThread");
         aiThread = new HandlerThread("MidasThread");
         aiThread.start();
         aiHandler = new Handler(aiThread.getLooper());
     }
 
     private void initMidas() {
+        Log.i("BETABANS", "initMidas");
         try {
             android.content.res.AssetFileDescriptor fileDescriptor = getAssets().openFd("Midas-V2.tflite");
             java.io.FileInputStream inputStream = new java.io.FileInputStream(fileDescriptor.getFileDescriptor());
@@ -167,6 +174,7 @@ public class StartIsoStreamActivityUvc extends Activity {
     }
 
     private java.nio.ByteBuffer convertBitmapToByteBuffer(Bitmap bitmap) {
+        Log.i("BETABANS", "convertBitmapToByteBuffer");
         // MiDaS-V2.1 = 256x256 | 4 bytes per float, 3 channels (RGB)
         java.nio.ByteBuffer byteBuffer = java.nio.ByteBuffer.allocateDirect(4 * 256 * 256 * 3);
         byteBuffer.order(java.nio.ByteOrder.nativeOrder());
@@ -183,7 +191,8 @@ public class StartIsoStreamActivityUvc extends Activity {
         return byteBuffer;
     }
 
-    private void checkPathClear(float[][][] depthMap) {
+    private void checkPathClear(float[][][][] depthMap) {
+        Log.i("BETABANS", "checkPathClear");
         // depthMap is [1][256][256]
         // Check a 50x50 square in the center of the frame
         float totalDepth = 0;
@@ -191,7 +200,7 @@ public class StartIsoStreamActivityUvc extends Activity {
 
         for (int y = 103; y < 153; y++) {
             for (int x = 103; x < 153; x++) {
-                totalDepth += depthMap[0][y][x];
+                totalDepth += depthMap[0][y][x][0];
                 count++;
             }
         }
@@ -199,11 +208,14 @@ public class StartIsoStreamActivityUvc extends Activity {
         float averageDepth = totalDepth / count;
 
         if (averageDepth > 0.6f) {
-            Log.w("OBSTACLE", "Warning: Object detected at head height!");
+            Log.w("BETABANS", "Warning: Object detected at head height!");
+        } else {
+            Log.w("BETABANS", "No Object within Bounds & averageDepth > 0.6f");
         }
     }
 
     private void runMidasInference(byte[] yuy2Frame) {
+        Log.i("BETABANS", "runMidasInference");
         if (mInputBitmap == null || mInputBitmap.getWidth() != imageWidth) {
             mInputBitmap = Bitmap.createBitmap(imageWidth, imageHeight, Bitmap.Config.ARGB_8888);
             mResizedBitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888);
@@ -218,11 +230,13 @@ public class StartIsoStreamActivityUvc extends Activity {
 
         java.nio.ByteBuffer inputBuffer = convertBitmapToByteBuffer(mResizedBitmap);
 
-        float[][][] outputDepthMap = new float[1][256][256];
+        float[][][][] outputDepthMap = new float[1][256][256][1];
         if (tflite != null) {
             tflite.run(inputBuffer, outputDepthMap);
 
             checkPathClear(outputDepthMap);
+        } else {
+            Log.e("BETABANS", "tflite == null :(");
         }
     }
 
