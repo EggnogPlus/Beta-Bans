@@ -117,6 +117,7 @@ public class StartIsoStreamActivityUvc extends Activity {
 //    Log.e(); // Error
 
 
+    protected ImageView midasDepthView;
     private org.tensorflow.lite.Interpreter tflite;
     private HandlerThread aiThread;
     private Handler aiHandler;
@@ -182,6 +183,9 @@ public class StartIsoStreamActivityUvc extends Activity {
         int[] intValues = new int[256 * 256];
         bitmap.getPixels(intValues, 0, bitmap.getWidth(), 0, 0, bitmap.getWidth(), bitmap.getHeight());
 
+        int firstPixel = intValues[0];
+        Log.d("BETABANS", "DEBUG | First Pixel Hex: " + Integer.toHexString(firstPixel));
+
         byteBuffer.rewind();
         for (int pixelValue : intValues) {
             byteBuffer.putFloat(((pixelValue >> 16) & 0xFF) / 255.0f);
@@ -193,24 +197,35 @@ public class StartIsoStreamActivityUvc extends Activity {
 
     private void checkPathClear(float[][][][] depthMap) {
         Log.i("BETABANS", "checkPathClear");
-        // depthMap is [1][256][256]
-        // Check a 50x50 square in the center of the frame
-        float totalDepth = 0;
+        float min = Float.MAX_VALUE;
+        float max = Float.MIN_VALUE;
+
+        for (int y = 0; y < 256; y++) {
+            for (int x = 0; x < 256; x++) {
+                float val = depthMap[0][y][x][0];
+                if (val < min) min = val;
+                if (val > max) max = val;
+            }
+        }
+
+        float totalNormalizedDepth = 0;
         int count = 0;
 
         for (int y = 103; y < 153; y++) {
             for (int x = 103; x < 153; x++) {
-                totalDepth += depthMap[0][y][x][0];
+                // Normalize the value to 0.0 - 1.0 range
+                float normalized = (depthMap[0][y][x][0] - min) / (max - min + 1e-5f);
+                totalNormalizedDepth += normalized;
                 count++;
             }
         }
 
-        float averageDepth = totalDepth / count;
+        float averageDepth = totalNormalizedDepth / count;
 
-        if (averageDepth > 0.6f) {
-            Log.w("BETABANS", "Warning: Object detected at head height!");
-        } else {
-            Log.w("BETABANS", "No Object within Bounds & averageDepth > 0.6f");
+        // Adjust this threshold now that we are on a 0-1 scale.
+        // 0.8f means an object is taking up a lot of the 'closest' disparity range.
+        if (averageDepth > 0.8f) {
+            Log.w("BETABANS", "Warning: Object detected at head height! Avg: " + averageDepth);
         }
     }
 
@@ -220,7 +235,17 @@ public class StartIsoStreamActivityUvc extends Activity {
             mInputBitmap = Bitmap.createBitmap(imageWidth, imageHeight, Bitmap.Config.ARGB_8888);
             mResizedBitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888);
         }
+
+        if (yuy2Frame != null && yuy2Frame.length > 10) {
+            Log.v("BETABANS", "DEBUG | Frame Sample: " + yuy2Frame[0] + ", " + yuy2Frame[1]);
+        }
+
         YUY2pixeltobmp(yuy2Frame, mInputBitmap, imageWidth, imageHeight);
+
+        int pixelSample = mInputBitmap.getPixel(imageWidth/2, imageHeight/2);
+        if (pixelSample == Color.WHITE || pixelSample == 0) {
+            Log.e("BETABANS", "DEBUG | Input Bitmap is blank/white before resizing!");
+        }
 
         // Resize to MiDaS input size (256x256)
         android.graphics.Canvas canvas = new android.graphics.Canvas(mResizedBitmap);
@@ -233,11 +258,37 @@ public class StartIsoStreamActivityUvc extends Activity {
         float[][][][] outputDepthMap = new float[1][256][256][1];
         if (tflite != null) {
             tflite.run(inputBuffer, outputDepthMap);
-
             checkPathClear(outputDepthMap);
+            updateDepthView(outputDepthMap);
         } else {
             Log.e("BETABANS", "tflite == null :(");
         }
+    }
+
+    private void updateDepthView(float[][][][] depthMap) {
+        float min = Float.MAX_VALUE;
+        float max = Float.MIN_VALUE;
+
+        for (int y = 0; y < 256; y++) {
+            for (int x = 0; x < 256; x++) {
+                float val = depthMap[0][y][x][0];
+                if (val > max) max = val;
+                if (val < min) min = val;
+            }
+        }
+
+        Bitmap depthBitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888);
+        int[] pixels = new int[256 * 256];
+
+        for (int y = 0; y < 256; y++) {
+            for (int x = 0; x < 256; x++) {
+                float normalized = (depthMap[0][y][x][0] - min) / (max - min + 1e-5f);
+                int grayscale = (int) (normalized * 255);
+                pixels[y * 256 + x] = Color.rgb(grayscale, grayscale, grayscale);
+            }
+        }
+        depthBitmap.setPixels(pixels, 0, 256, 0, 0, 256, 256);
+        runOnUiThread(() -> midasDepthView.setImageBitmap(depthBitmap));
     }
 
     //endregion
@@ -515,6 +566,9 @@ public class StartIsoStreamActivityUvc extends Activity {
                         | View.SYSTEM_UI_FLAG_FULLSCREEN
                         | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
         imageView = (ImageView) findViewById(R.id.imageView);
+        // BETABANS /~~
+        midasDepthView = (ImageView) findViewById(R.id.midasDepthView);
+        // BETABANS ~~/
         // Start onClick Listener method
         startStream = (Button) findViewById(R.id.startStream);
         startStream.setOnClickListener(new View.OnClickListener() {

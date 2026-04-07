@@ -24,6 +24,16 @@
         android:layout_height="match_parent"
         android:adjustViewBounds="false" />
 
+    <ImageView
+        android:id="@+id/midasDepthView"
+        android:layout_width="220dp"
+        android:layout_height="220dp"
+        android:layout_gravity="bottom|end"
+        android:layout_margin="16dp"
+        android:background="#000000"
+        android:scaleType="centerCrop"
+        android:elevation="10dp" />
+
 
     <FrameLayout
         android:layout_width="match_parent"
