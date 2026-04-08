@@ -38,6 +38,7 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.ImageFormat;
 import android.graphics.Matrix;
+import android.graphics.Paint;
 import android.graphics.PorterDuff;
 import android.graphics.Rect;
 import android.graphics.YuvImage;
@@ -118,6 +119,8 @@ public class StartIsoStreamActivityUvc extends Activity {
 
 
     protected ImageView midasDepthView;
+    protected TextView midasDepthValue;
+
     private org.tensorflow.lite.Interpreter tflite;
     private HandlerThread aiThread;
     private Handler aiHandler;
@@ -125,10 +128,11 @@ public class StartIsoStreamActivityUvc extends Activity {
     private Bitmap mInputBitmap;
     private Bitmap mResizedBitmap;
     private byte[] midasBuffr;
+
     private final IFrameCallback mFrameCallback = new IFrameCallback() {
         @Override
         public void onFrame(final byte[] frame) {
-            Log.d("BETABANS", "onFrame");
+            Log.d("BETABANS_DEBUG", "onFrame");
 
             synchronized(midasBuffr) {
                 System.arraycopy(frame, 0, midasBuffr, 0, frame.length);
@@ -151,14 +155,14 @@ public class StartIsoStreamActivityUvc extends Activity {
     };
 
     private void setupAiThread() {
-        Log.i("BETABANS", "setupAiThread");
+        Log.i("BETABANS_DEBUG", "setupAiThread");
         aiThread = new HandlerThread("MidasThread");
         aiThread.start();
         aiHandler = new Handler(aiThread.getLooper());
     }
 
     private void initMidas() {
-        Log.i("BETABANS", "initMidas");
+        Log.i("BETABANS_DEBUG", "initMidas");
         try {
             android.content.res.AssetFileDescriptor fileDescriptor = getAssets().openFd("Midas-V2.tflite");
             java.io.FileInputStream inputStream = new java.io.FileInputStream(fileDescriptor.getFileDescriptor());
@@ -168,14 +172,14 @@ public class StartIsoStreamActivityUvc extends Activity {
             java.nio.MappedByteBuffer modelBuffer = fileChannel.map(java.nio.channels.FileChannel.MapMode.READ_ONLY, startOffset, declaredLength);
 
             tflite = new org.tensorflow.lite.Interpreter(modelBuffer);
-            Log.d("BETABANS", "MiDaS Model loaded successfully");
+            Log.d("BETABANS_DEBUG", "MiDaS Model loaded successfully");
         } catch (Exception e) {
-            Log.e("BETABANS", "Error loading model", e);
+            Log.e("BETABANS_DEBUG", "Error loading model", e);
         }
     }
 
     private java.nio.ByteBuffer convertBitmapToByteBuffer(Bitmap bitmap) {
-        Log.i("BETABANS", "convertBitmapToByteBuffer");
+        Log.i("BETABANS_DEBUG", "convertBitmapToByteBuffer");
         // MiDaS-V2.1 = 256x256 | 4 bytes per float, 3 channels (RGB)
         java.nio.ByteBuffer byteBuffer = java.nio.ByteBuffer.allocateDirect(4 * 256 * 256 * 3);
         byteBuffer.order(java.nio.ByteOrder.nativeOrder());
@@ -184,7 +188,7 @@ public class StartIsoStreamActivityUvc extends Activity {
         bitmap.getPixels(intValues, 0, bitmap.getWidth(), 0, 0, bitmap.getWidth(), bitmap.getHeight());
 
         int firstPixel = intValues[0];
-        Log.d("BETABANS", "DEBUG | First Pixel Hex: " + Integer.toHexString(firstPixel));
+        Log.d("BETABANS_DEBUG", "DEBUG | First Pixel Hex: " + Integer.toHexString(firstPixel));
 
         byteBuffer.rewind();
         for (int pixelValue : intValues) {
@@ -195,8 +199,8 @@ public class StartIsoStreamActivityUvc extends Activity {
         return byteBuffer;
     }
 
-    private void checkPathClear(float[][][][] depthMap) {
-        Log.i("BETABANS", "checkPathClear");
+    private float checkPathClear(float[][][][] depthMap) {
+        Log.i("BETABANS_DEBUG", "checkPathClear");
         float min = Float.MAX_VALUE;
         float max = Float.MIN_VALUE;
 
@@ -211,8 +215,13 @@ public class StartIsoStreamActivityUvc extends Activity {
         float totalNormalizedDepth = 0;
         int count = 0;
 
-        for (int y = 103; y < 153; y++) {
-            for (int x = 103; x < 153; x++) {
+        // VALUE COMBOS
+        // 103/153
+        // 256/256 doesn't do anything
+        // 50/256 top slice
+        // 128/256 top half
+        for (int y = 0; y < 128; y++) {
+            for (int x = 0; x < 256; x++) {
                 // Normalize the value to 0.0 - 1.0 range
                 float normalized = (depthMap[0][y][x][0] - min) / (max - min + 1e-5f);
                 totalNormalizedDepth += normalized;
@@ -222,29 +231,36 @@ public class StartIsoStreamActivityUvc extends Activity {
 
         float averageDepth = totalNormalizedDepth / count;
 
-        // Adjust this threshold now that we are on a 0-1 scale.
-        // 0.8f means an object is taking up a lot of the 'closest' disparity range.
+        // averageDepth > 0.(6-8)f | this means an object is taking up a lot of the 'closest' disparity range.
+        // averageDepth < 0.5f | this means an object is so close it takes up the entire camera view and therefore the relative depth values are low
         if (averageDepth > 0.8f) {
-            Log.w("BETABANS", "Warning: Object detected at head height! Avg: " + averageDepth);
+            Log.w("BETABANS", "HIGH Warning: Head High Obstacle Detected" + averageDepth);
+        } else if (averageDepth > 0.5f) {
+            Log.d("BETABANS", "MED Warning: Potential Head High Obstacle Detected " + averageDepth);
+        } else {
+            Log.i("BETABANS", "Average Depth: " + averageDepth);
+
         }
+
+        return averageDepth;
     }
 
     private void runMidasInference(byte[] yuy2Frame) {
-        Log.i("BETABANS", "runMidasInference");
+        Log.i("BETABANS_DEBUG", "runMidasInference");
         if (mInputBitmap == null || mInputBitmap.getWidth() != imageWidth) {
             mInputBitmap = Bitmap.createBitmap(imageWidth, imageHeight, Bitmap.Config.ARGB_8888);
             mResizedBitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888);
         }
 
         if (yuy2Frame != null && yuy2Frame.length > 10) {
-            Log.v("BETABANS", "DEBUG | Frame Sample: " + yuy2Frame[0] + ", " + yuy2Frame[1]);
+            Log.v("BETABANS_DEBUG", "DEBUG | Frame Sample: " + yuy2Frame[0] + ", " + yuy2Frame[1]);
         }
 
         YUY2pixeltobmp(yuy2Frame, mInputBitmap, imageWidth, imageHeight);
 
         int pixelSample = mInputBitmap.getPixel(imageWidth/2, imageHeight/2);
         if (pixelSample == Color.WHITE || pixelSample == 0) {
-            Log.e("BETABANS", "DEBUG | Input Bitmap is blank/white before resizing!");
+            Log.e("BETABANS_DEBUG", "DEBUG | Input Bitmap is blank/white before resizing!");
         }
 
         // Resize to MiDaS input size (256x256)
@@ -258,14 +274,14 @@ public class StartIsoStreamActivityUvc extends Activity {
         float[][][][] outputDepthMap = new float[1][256][256][1];
         if (tflite != null) {
             tflite.run(inputBuffer, outputDepthMap);
-            checkPathClear(outputDepthMap);
-            updateDepthView(outputDepthMap);
+            float avgDepth = checkPathClear(outputDepthMap);
+            updateDepthView(outputDepthMap, avgDepth);
         } else {
-            Log.e("BETABANS", "tflite == null :(");
+            Log.e("BETABANS_DEBUG", "tflite == null");
         }
     }
 
-    private void updateDepthView(float[][][][] depthMap) {
+    private void updateDepthView(float[][][][] depthMap, float avgDepth) {
         float min = Float.MAX_VALUE;
         float max = Float.MIN_VALUE;
 
@@ -288,7 +304,19 @@ public class StartIsoStreamActivityUvc extends Activity {
             }
         }
         depthBitmap.setPixels(pixels, 0, 256, 0, 0, 256, 256);
-        runOnUiThread(() -> midasDepthView.setImageBitmap(depthBitmap));
+        runOnUiThread(() -> {
+            Canvas canvas = new Canvas(depthBitmap);
+            Paint paint = new Paint();
+            paint.setColor(Color.RED);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(2.0f);
+
+            // startX, startY, endX, endY,
+            // REPR. VALUES NOT IN THIS FUNC.
+            canvas.drawRect(0, 0, 256, 128, paint);
+            midasDepthView.setImageBitmap(depthBitmap);
+            midasDepthValue.setText(String.format("%.2f", avgDepth));
+        });
     }
 
     //endregion
@@ -568,6 +596,7 @@ public class StartIsoStreamActivityUvc extends Activity {
         imageView = (ImageView) findViewById(R.id.imageView);
         // BETABANS /~~
         midasDepthView = (ImageView) findViewById(R.id.midasDepthView);
+        midasDepthValue = (TextView) findViewById(R.id.midasDepthValue);
         // BETABANS ~~/
         // Start onClick Listener method
         startStream = (Button) findViewById(R.id.startStream);
@@ -1131,7 +1160,7 @@ public class StartIsoStreamActivityUvc extends Activity {
                 } else if (videoformat.equals("YUY2") || (videoformat.equals("UYVY"))) {
                     ////////////////////////////////    YUY2   /////////////////////////////
                     //////////////////////    !ADAFRUIT VIDEO FORMAT!   ////////////////////
-                    Log.d("BETABANS", "Entered YUY2 block successfully - Initializing MiDas Buffer");
+                    Log.d("BETABANS_DEBUG", "Entered YUY2 block successfully - Initializing MiDas Buffer");
 
                     if (midasBuffr == null || midasBuffr.length != (imageWidth * imageHeight * 2)) {
                         midasBuffr = new byte[imageWidth * imageHeight * 2];
