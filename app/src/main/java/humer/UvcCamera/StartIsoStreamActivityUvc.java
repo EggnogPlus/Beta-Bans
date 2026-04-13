@@ -55,6 +55,8 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
 import android.provider.MediaStore;
 import android.text.TextUtils;
 import android.util.DisplayMetrics;
@@ -99,6 +101,7 @@ import java.util.Arrays;
 import java.util.Date;
 import java.util.Formatter;
 import java.util.HashMap;
+import java.util.LinkedList;
 
 import humer.UvcCamera.JNA_I_LibUsb.JNA_I_LibUsb;
 import humer.UvcCamera.UVC_Descriptor.IUVC_Descriptor;
@@ -108,7 +111,40 @@ import io.github.yavski.fabspeeddial.SimpleMenuListenerAdapter;
 
 public class StartIsoStreamActivityUvc extends Activity {
 
-    //region BetaBans Vars/Methods
+    private final IFrameCallback mFrameCallback = new IFrameCallback() {
+        @Override
+        public void onFrame(final byte[] frame) {
+            Log.d("BETABANS_DEBUG", "onFrame");
+
+            // MIDAS
+            synchronized(midasBuffr) {
+                System.arraycopy(frame, 0, midasBuffr, 0, frame.length);
+            }
+            aiHandler.post(() -> {
+                runMidasInference(midasBuffr);
+            });
+
+            // LUCAS-KANADE
+
+
+//            Old frame process
+//
+//            if (imageCapture || videorecord || videorecordApiJellyBeanNup) {
+//                try {
+//                    processReceivedVideoFrameYuv(frame, null);
+//                } catch (Exception e) {
+//                    e.printStackTrace();
+//                }
+//            }
+        }
+    };
+
+    //region BetaBans Lucas-Kanade Vars/Methods
+
+    //endregion
+
+
+    //region BetaBans Midas Vars/Methods
 
 //    Log Cheatsheet
 //    Log.v(); // Verbose
@@ -129,30 +165,35 @@ public class StartIsoStreamActivityUvc extends Activity {
     private Bitmap mResizedBitmap;
     private byte[] midasBuffr;
 
-    private final IFrameCallback mFrameCallback = new IFrameCallback() {
-        @Override
-        public void onFrame(final byte[] frame) {
-            Log.d("BETABANS_DEBUG", "onFrame");
+    private final LinkedList<Float> depthHistory = new LinkedList<>();
+    private final int MAX_HISTORY_SIZE = 2;
 
-            synchronized(midasBuffr) {
-                System.arraycopy(frame, 0, midasBuffr, 0, frame.length);
+    // Bounding Box
+    int Y_START = 0;
+    int Y_END = 64;
+    int X_START = 64;
+    int X_END = 192;
+
+    private void triggerVibration(int intensity) {
+        Vibrator v = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+
+        if (v != null && v.hasVibrator()) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                if (intensity > 100) {
+                    v.vibrate(VibrationEffect.createOneShot(750, intensity));
+                } else {
+                    v.vibrate(VibrationEffect.createOneShot(50, intensity));
+                }
+            } else {
+                if (intensity > 100) {
+                    v.vibrate(750);
+                } else {
+                    v.vibrate(50);
+                }
+
             }
-
-            aiHandler.post(() -> {
-                runMidasInference(midasBuffr);
-            });
-
-//            Old frame process
-//
-//            if (imageCapture || videorecord || videorecordApiJellyBeanNup) {
-//                try {
-//                    processReceivedVideoFrameYuv(frame, null);
-//                } catch (Exception e) {
-//                    e.printStackTrace();
-//                }
-//            }
         }
-    };
+    }
 
     private void setupAiThread() {
         Log.i("BETABANS_DEBUG", "setupAiThread");
@@ -200,7 +241,7 @@ public class StartIsoStreamActivityUvc extends Activity {
     }
 
     private float checkPathClear(float[][][][] depthMap) {
-        Log.i("BETABANS_DEBUG", "checkPathClear");
+        // FIND MIN/MAX OF IMAGE FOR NORMALIZATION
         float min = Float.MAX_VALUE;
         float max = Float.MIN_VALUE;
 
@@ -212,37 +253,44 @@ public class StartIsoStreamActivityUvc extends Activity {
             }
         }
 
+        // Check Head-High area
         float totalNormalizedDepth = 0;
         int count = 0;
 
-        // VALUE COMBOS
-        // 103/153
-        // 256/256 doesn't do anything
-        // 50/256 top slice
-        // 128/256 top half
-        for (int y = 0; y < 128; y++) {
-            for (int x = 0; x < 256; x++) {
-                // Normalize the value to 0.0 - 1.0 range
+        for (int y = Y_START; y < Y_END; y++) {
+            for (int x = X_START; x < X_END; x++) {
                 float normalized = (depthMap[0][y][x][0] - min) / (max - min + 1e-5f);
                 totalNormalizedDepth += normalized;
                 count++;
             }
         }
 
-        float averageDepth = totalNormalizedDepth / count;
+        float currentFrameAvg = totalNormalizedDepth / count;
 
-        // averageDepth > 0.(6-8)f | this means an object is taking up a lot of the 'closest' disparity range.
-        // averageDepth < 0.5f | this means an object is so close it takes up the entire camera view and therefore the relative depth values are low
-        if (averageDepth > 0.8f) {
-            Log.w("BETABANS", "HIGH Warning: Head High Obstacle Detected" + averageDepth);
-        } else if (averageDepth > 0.5f) {
-            Log.d("BETABANS", "MED Warning: Potential Head High Obstacle Detected " + averageDepth);
-        } else {
-            Log.i("BETABANS", "Average Depth: " + averageDepth);
-
+        // TEMPORAL SMOOTHING (add to history)
+        depthHistory.add(currentFrameAvg);
+        if (depthHistory.size() > MAX_HISTORY_SIZE) {
+            depthHistory.removeFirst();
         }
 
-        return averageDepth;
+        float smoothedAvg = 0;
+        for (float val : depthHistory) {
+            smoothedAvg += val;
+        }
+        smoothedAvg /= depthHistory.size();
+
+        // WARNING
+        if (smoothedAvg > 0.75f) {
+            Log.w("BETABANS", "HIGH Warning: Head High Obstacle! (" + smoothedAvg + ")");
+            triggerVibration(200);
+        } else if (smoothedAvg > 0.6f) {
+            Log.d("BETABANS", "MED Warning: Potential Obstacle (" + smoothedAvg + ")");
+            triggerVibration(10);
+        } else {
+            Log.i("BETABANS", "Path Clear (" + smoothedAvg + ")");
+        }
+
+        return smoothedAvg;
     }
 
     private void runMidasInference(byte[] yuy2Frame) {
@@ -311,9 +359,7 @@ public class StartIsoStreamActivityUvc extends Activity {
             paint.setStyle(Paint.Style.STROKE);
             paint.setStrokeWidth(2.0f);
 
-            // startX, startY, endX, endY,
-            // REPR. VALUES NOT IN THIS FUNC.
-            canvas.drawRect(0, 0, 256, 128, paint);
+            canvas.drawRect(X_START, Y_START, X_END, Y_END, paint);
             midasDepthView.setImageBitmap(depthBitmap);
             midasDepthValue.setText(String.format("%.2f", avgDepth));
         });
@@ -592,7 +638,8 @@ public class StartIsoStreamActivityUvc extends Activity {
                         | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
                         | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                         | View.SYSTEM_UI_FLAG_FULLSCREEN
-                        | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+                        | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                        | View.KEEP_SCREEN_ON);
         imageView = (ImageView) findViewById(R.id.imageView);
         // BETABANS /~~
         midasDepthView = (ImageView) findViewById(R.id.midasDepthView);
