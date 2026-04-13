@@ -89,6 +89,19 @@ import com.serenegiant.usb.IFrameCallback;
 import com.sun.jna.Pointer;
 
 import org.apache.commons.io.IOUtils;
+import org.opencv.android.Utils;
+import org.opencv.core.CvType;
+import org.opencv.core.Mat;
+import org.opencv.core.MatOfByte;
+import org.opencv.core.MatOfFloat;
+import org.opencv.core.MatOfPoint;
+import org.opencv.core.MatOfPoint2f;
+import org.opencv.core.Point;
+import org.opencv.core.Scalar;
+import org.opencv.core.Size;
+import org.opencv.core.TermCriteria;
+import org.opencv.imgproc.Imgproc;
+import org.opencv.video.Video;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -97,11 +110,13 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Date;
 import java.util.Formatter;
 import java.util.HashMap;
 import java.util.LinkedList;
+import java.util.List;
 
 import humer.UvcCamera.JNA_I_LibUsb.JNA_I_LibUsb;
 import humer.UvcCamera.UVC_Descriptor.IUVC_Descriptor;
@@ -111,20 +126,28 @@ import io.github.yavski.fabspeeddial.SimpleMenuListenerAdapter;
 
 public class StartIsoStreamActivityUvc extends Activity {
 
+    // BETABANS
+
+    private boolean MiDAS_IMPLEMENTATION = false; // true for MiDas - false for Lucas-Kanade
+    protected ImageView algorithmView;
+
     private final IFrameCallback mFrameCallback = new IFrameCallback() {
         @Override
         public void onFrame(final byte[] frame) {
             Log.d("BETABANS_DEBUG", "onFrame");
 
-            // MIDAS
-            synchronized(midasBuffr) {
-                System.arraycopy(frame, 0, midasBuffr, 0, frame.length);
+            if (MiDAS_IMPLEMENTATION) {
+                // MIDAS
+                synchronized(midasBuffr) {
+                    System.arraycopy(frame, 0, midasBuffr, 0, frame.length);
+                }
+                aiHandler.post(() -> {
+                    runMidasInference(midasBuffr);
+                });
+            } else {
+                // LUCAS-KANADE
+                lucas_kanade(frame);
             }
-            aiHandler.post(() -> {
-                runMidasInference(midasBuffr);
-            });
-
-            // LUCAS-KANADE
 
 
 //            Old frame process
@@ -138,42 +161,6 @@ public class StartIsoStreamActivityUvc extends Activity {
 //            }
         }
     };
-
-    //region BetaBans Lucas-Kanade Vars/Methods
-
-    //endregion
-
-
-    //region BetaBans Midas Vars/Methods
-
-//    Log Cheatsheet
-//    Log.v(); // Verbose
-//    Log.d(); // Debug
-//    Log.i(); // Info
-//    Log.w(); // Warning
-//    Log.e(); // Error
-
-
-    protected ImageView midasDepthView;
-    protected TextView midasDepthValue;
-
-    private org.tensorflow.lite.Interpreter tflite;
-    private HandlerThread aiThread;
-    private Handler aiHandler;
-
-    private Bitmap mInputBitmap;
-    private Bitmap mResizedBitmap;
-    private byte[] midasBuffr;
-
-    private final LinkedList<Float> depthHistory = new LinkedList<>();
-    private final int MAX_HISTORY_SIZE = 2;
-
-    // Bounding Box
-    int Y_START = 0;
-    int Y_END = 64;
-    int X_START = 64;
-    int X_END = 192;
-
     private void triggerVibration(int intensity) {
         Vibrator v = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
 
@@ -194,6 +181,142 @@ public class StartIsoStreamActivityUvc extends Activity {
             }
         }
     }
+
+
+
+    //region BetaBans Lucas-Kanade Vars/Methods
+    private Mat oldGray;
+    private MatOfPoint2f p0;
+    private Scalar[] colors;
+    private boolean isProcessing;
+
+    private void lucas_kanade(byte[] frame) {
+
+        if (isProcessing) return;
+
+        isProcessing = true;
+
+        try {
+            // raw Matrix from the camera bytes (YUY2 format)
+            Mat yuy2Mat = new Mat(imageHeight, imageWidth, CvType.CV_8UC2);
+            yuy2Mat.put(0, 0, frame);
+
+            // Convert to Grayscale for the algorithm and RGBA for display
+            Mat currentGray = new Mat();
+            Mat displayMat = new Mat();
+            Imgproc.cvtColor(yuy2Mat, currentGray, Imgproc.COLOR_YUV2GRAY_YUY2);
+            Imgproc.cvtColor(yuy2Mat, displayMat, Imgproc.COLOR_YUV2RGBA_YUY2);
+
+            // If this is the first frame, find points to track
+            if (oldGray == null) {
+                oldGray = currentGray.clone();
+
+                // Find corners
+                MatOfPoint corners = new MatOfPoint();
+                Imgproc.goodFeaturesToTrack(oldGray, corners, 100, 0.3, 7);
+
+                // Convert ints to floats for the tracking algo
+                p0 = new MatOfPoint2f();
+                corners.convertTo(p0, CvType.CV_32F);
+
+                corners.release();
+            } else {
+                // Calculate where the points moved
+                MatOfPoint2f p1 = new MatOfPoint2f();
+                MatOfByte status = new MatOfByte();
+                MatOfFloat err = new MatOfFloat();
+
+                // Criteria - reduce effort on each calculation; speed up\accuracy down
+                 TermCriteria criteria = new TermCriteria(TermCriteria.COUNT + TermCriteria.EPS, 5, 0.03);
+                // ACTUAL OPTICAL FLOW CALC
+                Video.calcOpticalFlowPyrLK(oldGray, currentGray, p0, p1, status, err, new Size(15, 15), 2, criteria);
+
+                // Filter "good" points and draw them
+                byte[] statusArr = status.toArray();
+                Point[] p1Arr = p1.toArray();
+                List<Point> goodNewList = new ArrayList<>();
+
+                for (int i = 0; i < statusArr.length; i++) {
+                    if (statusArr[i] == 1) { // 1 means point was successfully tracked (yippee)
+                        goodNewList.add(p1Arr[i]);
+
+                        // Draw a circle on the display frame - from lab2
+                        Scalar color = colors[i % 100];
+                        Imgproc.circle(displayMat, p1Arr[i], 5, color, -1);
+                    }
+                }
+
+                // Update state for the next frame
+                oldGray.release();
+                oldGray = currentGray.clone();
+
+                if (goodNewList.size() > 10) {
+                    p0.fromList(goodNewList);
+                } else {
+                    // If lost too many points, find new ones
+                    MatOfPoint corners = new MatOfPoint();
+                    Imgproc.goodFeaturesToTrack(oldGray, corners, 100, 0.3, 7);
+                    corners.convertTo(p0, CvType.CV_32F);
+                    corners.release();
+                }
+
+                // Cleanup temporary memory
+                p1.release();
+                status.release();
+                err.release();
+            }
+
+            // UI
+            Bitmap outBitmap = Bitmap.createBitmap(displayMat.cols(), displayMat.rows(), Bitmap.Config.ARGB_8888);
+            Utils.matToBitmap(displayMat, outBitmap);
+
+            runOnUiThread(() -> {
+                if (algorithmView != null) {
+                    algorithmView.setImageBitmap(outBitmap);
+                }
+            });
+
+            // Final cleanup of heavy objects
+            yuy2Mat.release();
+            currentGray.release();
+            displayMat.release();
+        } finally {
+            isProcessing = false;
+        }
+    }
+
+
+    //endregion
+
+
+    //region BetaBans Midas Vars/Methods
+
+//    Log Cheatsheet
+//    Log.v(); // Verbose
+//    Log.d(); // Debug
+//    Log.i(); // Info
+//    Log.w(); // Warning
+//    Log.e(); // Error
+
+    protected TextView midasDepthValue;
+
+    private org.tensorflow.lite.Interpreter tflite;
+    private HandlerThread aiThread;
+    private Handler aiHandler;
+
+    private Bitmap mInputBitmap;
+    private Bitmap mResizedBitmap;
+    private byte[] midasBuffr;
+
+    private final LinkedList<Float> depthHistory = new LinkedList<>();
+    private final int MAX_HISTORY_SIZE = 2;
+
+    // Bounding Box
+    int Y_START = 0;
+    int Y_END = 64;
+    int X_START = 64;
+    int X_END = 192;
+
 
     private void setupAiThread() {
         Log.i("BETABANS_DEBUG", "setupAiThread");
@@ -360,7 +483,7 @@ public class StartIsoStreamActivityUvc extends Activity {
             paint.setStrokeWidth(2.0f);
 
             canvas.drawRect(X_START, Y_START, X_END, Y_END, paint);
-            midasDepthView.setImageBitmap(depthBitmap);
+            algorithmView.setImageBitmap(depthBitmap);
             midasDepthValue.setText(String.format("%.2f", avgDepth));
         });
     }
@@ -568,8 +691,11 @@ public class StartIsoStreamActivityUvc extends Activity {
     protected void onStart() {
         super.onStart();
         Log.v("STATE", "onStart() is called");
-        setupAiThread();
-        initMidas();
+
+        if (MiDAS_IMPLEMENTATION) {
+            setupAiThread();
+            initMidas();
+        }
     }
 
     private void quickStartGC0307() {
@@ -642,9 +768,28 @@ public class StartIsoStreamActivityUvc extends Activity {
                         | View.KEEP_SCREEN_ON);
         imageView = (ImageView) findViewById(R.id.imageView);
         // BETABANS /~~
-        midasDepthView = (ImageView) findViewById(R.id.midasDepthView);
-        midasDepthValue = (TextView) findViewById(R.id.midasDepthValue);
+
+        algorithmView = (ImageView) findViewById(R.id.algorithmView);
+
+        if (MiDAS_IMPLEMENTATION) {
+            // MiDas
+            midasDepthValue = (TextView) findViewById(R.id.midasDepthValue);
+        } else {
+            // Lucas-Kanade
+            if (!org.opencv.android.OpenCVLoader.initDebug()) {
+                Log.e("BETABANS", "Unable to load OpenCV");
+            } else {
+                Log.d("BETABANS", "OpenCV loaded successfully");
+
+                colors = new Scalar[100];
+                for (int i = 0; i < 100; i++) {
+                    colors[i] = new Scalar(Math.random() * 255, Math.random() * 255, Math.random() * 255);
+                }
+            }
+        }
+
         // BETABANS ~~/
+
         // Start onClick Listener method
         startStream = (Button) findViewById(R.id.startStream);
         startStream.setOnClickListener(new View.OnClickListener() {
