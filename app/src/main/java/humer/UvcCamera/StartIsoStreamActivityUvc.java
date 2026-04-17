@@ -126,43 +126,48 @@ import io.github.yavski.fabspeeddial.SimpleMenuListenerAdapter;
 
 public class StartIsoStreamActivityUvc extends Activity {
 
-    // BETABANS
+    //region BETABANS
 
-    private boolean MiDAS_IMPLEMENTATION = false; // true for MiDas - false for Lucas-Kanade
+    /// VARS
+//    private boolean MiDAS_IMPLEMENTATION = false; // true for MiDas - false for Lucas-Kanade
+    private final boolean COMBINED_IMPLEMENTATION = true; // true for combined - false for normal Lucas-Kanade
     protected ImageView algorithmView;
+    float[][][][] latestDepthMap;
+    float latestAvgDepth;
+    private final LinkedList<Float> depthHistory = new LinkedList<>();
+    private final int MAX_HISTORY_SIZE = 2;
+    Bitmap sideScreenBitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888);
+    int[] pixelsBuffer = new int[256 * 256];
+
+
 
     private final IFrameCallback mFrameCallback = new IFrameCallback() {
         @Override
         public void onFrame(final byte[] frame) {
-            Log.d("BETABANS_DEBUG", "onFrame");
+//            Log.d("BETABANS_DEBUG", "Frame Received @ " + System.currentTimeMillis());
 
-            if (MiDAS_IMPLEMENTATION) {
-                // MIDAS
-                synchronized(midasBuffr) {
-                    System.arraycopy(frame, 0, midasBuffr, 0, frame.length);
-                }
-                aiHandler.post(() -> {
-                    runMidasInference(midasBuffr);
-                });
-            } else {
-                // LUCAS-KANADE
-                lucas_kanade(frame);
-            }
+            // Combined Solution
+            combinedEntry(frame);
 
-
-//            Old frame process
-//
-//            if (imageCapture || videorecord || videorecordApiJellyBeanNup) {
-//                try {
-//                    processReceivedVideoFrameYuv(frame, null);
-//                } catch (Exception e) {
-//                    e.printStackTrace();
+            // One or the other
+//            if (MiDAS_IMPLEMENTATION) {
+//                // MIDAS
+//                synchronized(midasBuffr) {
+//                    System.arraycopy(frame, 0, midasBuffr, 0, frame.length);
 //                }
+//                aiHandler.post(() -> {
+//                    runMidasInference(midasBuffr);
+//                });
+//            } else {
+//                // LUCAS-KANADE
+//                lucas_kanade(frame);
 //            }
         }
     };
     private void triggerVibration(int intensity) {
         Vibrator v = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+
+        Log.d("BETABANS_DEBUG", "Vibration Triggered @ " + System.currentTimeMillis());
 
         if (v != null && v.hasVibrator()) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -182,9 +187,339 @@ public class StartIsoStreamActivityUvc extends Activity {
         }
     }
 
+    private void checkCollisionWithDepth(List<Point> oldPoints, List<Point> newPoints) {
+        if (oldPoints.size() < 2 || newPoints.size() < 2) return;
+
+        double oldDistSum = 0;
+        double newDistSum = 0;
+        int validPointCount = 0;
+
+        for (int i = 0; i < oldPoints.size() - 1; i++) {
+            Point n1 = newPoints.get(i);
+            Point o1 = oldPoints.get(i);
+            Point n2 = newPoints.get(i + 1);
+            Point o2 = oldPoints.get(i + 1);
+
+            // Indv. Divergence
+            // Do this to add points if they have a high divergence inside the bounding box
+            double distOld = Math.hypot(o1.x - o2.x, o1.y - o2.y);
+            double distNew = Math.hypot(n1.x - n2.x, n1.y - n2.y);
+            double individualDiv = (distOld > 0) ? (distNew / distOld) : 1.0;
+
+            // Map the LK point (640x480) to MiDaS space (256x256)
+            int midasX = (int) (n1.x * (256.0 / 640.0));
+            int midasY = (int) (n1.y * (256.0 / 480.0));
+
+            // Get depth at this specific point (ensure it's within bounds)
+            if (midasX >= 0 && midasX < 256 && midasY >= 0 && midasY < 256) {
+                float depthValue = latestDepthMap[0][midasX][midasY][0];
+
+//                Log.d("BETABANS", "Depth Value: " + depthValue);
+
+                // Only consider points that r "somewhat close"
+                // AND
+                // points if they are LOOMING (divergence)
+                if (depthValue > 0.05f || individualDiv > 1.5) {
+                    oldDistSum += distOld;
+                    newDistSum += individualDiv;
+                    validPointCount++;
+                }
+            }
+        }
+
+        if (validPointCount > 0) {
+            double avgOldDist = oldDistSum / validPointCount;
+            double avgNewDist = newDistSum / validPointCount;
+            double divergence = avgNewDist / avgOldDist;
+
+            // Final Trigger: High divergence + verified proximity
+//            Log.d("BETABANS", "Divergence: " + divergence);
+            if (divergence > 1.5) {
+                triggerVibration(200);
+            } else if (divergence > 1.05) {
+                triggerVibration(10);
+            }
+        } else {
+            Log.i("BETABANS", "NO VALID POINTS");
+        }
+    }
+
+    private float updateAverageDepth(float[][][][] depthMap) {
+        float min = Float.MAX_VALUE;
+        float max = Float.MIN_VALUE;
+
+        for (int y = 0; y < 256; y++) {
+            for (int x = 0; x < 256; x++) {
+                float val = depthMap[0][y][x][0];
+                if (val < min) min = val;
+                if (val > max) max = val;
+            }
+        }
+
+        // Check Head-High area
+        float totalNormalizedDepth = 0;
+        int count = 0;
+
+        for (int y = Y_START; y < Y_END; y++) {
+            for (int x = X_START; x < X_END; x++) {
+                float normalized = (depthMap[0][y][x][0] - min) / (max - min + 1e-5f);
+                totalNormalizedDepth += normalized;
+                count++;
+            }
+        }
+
+        float currentFrameAvg = totalNormalizedDepth / count;
+
+        // TEMPORAL SMOOTHING (add to history)
+        depthHistory.add(currentFrameAvg);
+        if (depthHistory.size() > MAX_HISTORY_SIZE) {
+            depthHistory.removeFirst();
+        }
+
+        float smoothedAvg = 0;
+        for (float val : depthHistory) {
+            smoothedAvg += val;
+        }
+        smoothedAvg /= depthHistory.size();
+
+        return smoothedAvg;
+    }
+
+    private void runMidasInferenceCOMBINEDIMPLEMENTATIONVERSION(byte[] yuy2Frame) {
+        if (mInputBitmap == null || mInputBitmap.getWidth() != imageWidth) {
+            mInputBitmap = Bitmap.createBitmap(imageWidth, imageHeight, Bitmap.Config.ARGB_8888);
+            mResizedBitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888);
+        }
+
+        // Convert YUY2 to Bitmap
+        YUY2pixeltobmp(yuy2Frame, mInputBitmap, imageWidth, imageHeight);
+
+        // Resize for Model Input (256x256)
+        android.graphics.Canvas canvas = new android.graphics.Canvas(mResizedBitmap);
+        android.graphics.Matrix matrix = new android.graphics.Matrix();
+        matrix.setScale(256f / imageWidth, 256f / imageHeight);
+        canvas.drawBitmap(mInputBitmap, matrix, null);
+
+        // Prepare Buffer and Run Inference
+        java.nio.ByteBuffer inputBuffer = convertBitmapToByteBuffer(mResizedBitmap);
+        float[][][][] outputDepthMap = new float[1][256][256][1];
+
+        if (tflite != null) {
+            tflite.run(inputBuffer, outputDepthMap);
+
+            // COMBINED IMPL. - Save to global variables for the "Combined" view to use later
+            latestDepthMap = outputDepthMap;
+            latestAvgDepth = updateAverageDepth(outputDepthMap);
+        } else {
+            Log.e("BETABANS_DEBUG", "tflite == null");
+        }
+    }
+
+    /// Update the algorithm view in bottom right with the MiDas depth map AND points from Lucas-Kanade
+    private void combinedUpdateView(Mat displayMat, List<Point> allGoodPoints) {
+        if (latestDepthMap == null) return;
+
+        float min = Float.MAX_VALUE;
+        float max = Float.MIN_VALUE;
+        for (int y = 0; y < 256; y++) {
+            for (int x = 0; x < 256; x++) {
+                float val = latestDepthMap[0][y][x][0];
+                if (val > max) max = val;
+                if (val < min) min = val;
+            }
+        }
+
+
+        for (int y = 0; y < 256; y++) {
+            for (int x = 0; x < 256; x++) {
+                float normalized = (latestDepthMap[0][y][x][0] - min) / (max - min + 1e-5f);
+                int grayscale = (int) (normalized * 255);
+                pixelsBuffer[y * 256 + x] = Color.rgb(grayscale, grayscale, grayscale);
+            }
+        }
+
+        sideScreenBitmap.setPixels(pixelsBuffer, 0, 256, 0, 0, 256, 256);
+
+//        Utils.matToBitmap(displayMat, depthBitmap);
+        runOnUiThread(() -> {
+            Canvas canvas = new Canvas(sideScreenBitmap);
+            Paint paint = new Paint();
+            Paint specialPointPaint = new Paint();
+
+            // Bounding Box
+            paint.setColor(Color.RED);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(2.0f);
+            canvas.drawRect(X_START, Y_START, X_END, Y_END, paint);
+
+            // Points
+            paint.setStyle(Paint.Style.FILL);
+            specialPointPaint.setStyle(Paint.Style.FILL);
+            specialPointPaint.setStrokeWidth(2.0f);
+
+            paint.setColor(Color.GREEN);
+            specialPointPaint.setColor(Color.WHITE);
+
+            if (allGoodPoints != null) {
+                for (Point p : allGoodPoints) {
+                    float sx = (float) (p.x * (256f/640f));
+                    float sy = (float) (p.y * (256f/480f));
+
+                    if (sx > X_START && sx < X_END
+                            && sy > Y_START && sy < Y_END) {
+                        canvas.drawCircle(sx, sy, 3, specialPointPaint);
+                    }else {
+                        canvas.drawCircle(sx, sy, 3, paint);
+                    }
+
+                }
+            }
+
+            midasDepthValue.setText(String.format("%.2f", latestAvgDepth));
+
+            algorithmView.setImageBitmap(sideScreenBitmap);
+        });
+    }
+
+
+    /// Re-Implementation of Lucas-Kanade method w/ MiDas depth map values to narrow field to search for
+    private void combinedEntry(byte[] frame) {
+
+        if (isProcessing) return;
+        isProcessing = true;
+
+        /// *GLOBAL VARS
+        // Bounding Box
+        int Y_START = 0;
+        int Y_END = 180;
+        int X_START = 160;
+        int X_END = 480;
+
+        List<Point> goodNewList = new ArrayList<>();
+        List<Point> allGoodPoints = new ArrayList<>();
+
+
+        try {
+            // Start Midas Inference
+            synchronized(midasBuffr) {
+                System.arraycopy(frame, 0, midasBuffr, 0, frame.length);
+            }
+            aiHandler.post(() -> {
+                runMidasInferenceCOMBINEDIMPLEMENTATIONVERSION(midasBuffr);
+            });
+
+
+            // raw Matrix from the camera bytes (YUY2 format)
+            Mat yuy2Mat = new Mat(imageHeight, imageWidth, CvType.CV_8UC2);
+            yuy2Mat.put(0, 0, frame);
+
+            // Convert to Grayscale for the algorithm and RGBA for display
+            Mat currentGray = new Mat();
+            Mat displayMat = new Mat();
+            Imgproc.cvtColor(yuy2Mat, currentGray, Imgproc.COLOR_YUV2GRAY_YUY2);
+            Imgproc.cvtColor(yuy2Mat, displayMat, Imgproc.COLOR_YUV2RGBA_YUY2);
+
+            // If this is the first frame, find points to track
+            if (oldGray == null) {
+                oldGray = currentGray.clone();
+
+                // Find corners
+                MatOfPoint corners = new MatOfPoint();
+                Imgproc.goodFeaturesToTrack(oldGray, corners, 50, 0.3, 7);
+
+                // Convert ints to floats for the tracking algo
+                p0 = new MatOfPoint2f();
+                corners.convertTo(p0, CvType.CV_32F);
+
+                corners.release();
+            } else {
+                // Calculate where the points moved
+                MatOfPoint2f p1 = new MatOfPoint2f();
+                MatOfByte status = new MatOfByte();
+                MatOfFloat err = new MatOfFloat();
+
+                // Criteria - reduce effort on each calculation; speed up\accuracy down
+                TermCriteria criteria = new TermCriteria(TermCriteria.COUNT + TermCriteria.EPS, 3, 0.03);
+
+                // Search window and pyramid depth - adjust when point loss is issues again
+                Size winSize = new Size(21, 21);
+                int maxLevel = 3;
+
+                // ACTUAL OPTICAL FLOW CALC
+                Video.calcOpticalFlowPyrLK(oldGray, currentGray, p0, p1, status, err, winSize, maxLevel, criteria);
+
+                // Filter "good" points and draw them
+                byte[] statusArr = status.toArray();
+                Point[] p1Arr = p1.toArray();
+                goodNewList = new ArrayList<>();
+                List<Point> goodOldList = new ArrayList<>();
+
+                for (int i = 0; i < statusArr.length; i++) {
+                    if (statusArr[i] == 1) { // 1 means point was successfully tracked (yippee)
+                        Point currentPoint = p1Arr[i];
+                        allGoodPoints.add(currentPoint);
+
+                        if (currentPoint.x > X_START && currentPoint.x < X_END &&
+                                currentPoint.y > Y_START && currentPoint.y < Y_END) { // Point is within Head Height Box
+                            goodNewList.add(p1Arr[i]);
+                            goodOldList.add(p0.toArray()[i]); // "Keep" the original point if the new point is good
+                        }
+
+                        // Draw a circle on the display frame - from lab2
+                        Scalar color = colors[i % 50];
+                        Imgproc.circle(displayMat, p1Arr[i], 5, color, -1);
+                    }
+                }
+
+                // COMBINED COLLISION CHECK
+                checkCollisionWithDepth(goodOldList, goodNewList);
+
+
+                // Update state for the next frame
+                oldGray.release();
+                oldGray = currentGray.clone();
+
+                if (goodNewList.size() > 10) {
+                    p0.fromList(goodNewList);
+                } else {
+                    // If lost too many points, find new ones
+                    MatOfPoint corners = new MatOfPoint();
+                    Imgproc.goodFeaturesToTrack(oldGray, corners, 50, 0.3, 7);
+                    corners.convertTo(p0, CvType.CV_32F);
+                    corners.release();
+                }
+
+                // Cleanup temporary memory
+                p1.release();
+                status.release();
+                err.release();
+            }
+
+            // UI
+            Bitmap outBitmap = Bitmap.createBitmap(displayMat.cols(), displayMat.rows(), Bitmap.Config.ARGB_8888);
+            Utils.matToBitmap(displayMat, outBitmap);
+
+            List<Point> finalGoodNewList = goodNewList;
+            runOnUiThread(() -> {
+                if (algorithmView != null) {
+                    combinedUpdateView(displayMat, allGoodPoints);
+                }
+            });
+
+            // Final cleanup of heavy objects
+            yuy2Mat.release();
+            currentGray.release();
+            displayMat.release();
+        } finally {
+            isProcessing = false;
+        }
+    }
+
+    //endregion
 
 
     //region BetaBans Lucas-Kanade Vars/Methods
+
     private Mat oldGray;
     private MatOfPoint2f p0;
     private Scalar[] colors;
@@ -195,6 +530,14 @@ public class StartIsoStreamActivityUvc extends Activity {
         if (isProcessing) return;
 
         isProcessing = true;
+
+        // Bounding Box
+        int Y_START = 0;
+        int Y_END = 180;
+        int X_START = 160;
+        int X_END = 480;
+
+        List<Point> goodNewList;
 
         try {
             // raw Matrix from the camera bytes (YUY2 format)
@@ -213,7 +556,7 @@ public class StartIsoStreamActivityUvc extends Activity {
 
                 // Find corners
                 MatOfPoint corners = new MatOfPoint();
-                Imgproc.goodFeaturesToTrack(oldGray, corners, 100, 0.3, 7);
+                Imgproc.goodFeaturesToTrack(oldGray, corners, 50, 0.3, 7);
 
                 // Convert ints to floats for the tracking algo
                 p0 = new MatOfPoint2f();
@@ -227,24 +570,31 @@ public class StartIsoStreamActivityUvc extends Activity {
                 MatOfFloat err = new MatOfFloat();
 
                 // Criteria - reduce effort on each calculation; speed up\accuracy down
-                 TermCriteria criteria = new TermCriteria(TermCriteria.COUNT + TermCriteria.EPS, 5, 0.03);
+                 TermCriteria criteria = new TermCriteria(TermCriteria.COUNT + TermCriteria.EPS, 3, 0.03);
                 // ACTUAL OPTICAL FLOW CALC
                 Video.calcOpticalFlowPyrLK(oldGray, currentGray, p0, p1, status, err, new Size(15, 15), 2, criteria);
 
                 // Filter "good" points and draw them
                 byte[] statusArr = status.toArray();
                 Point[] p1Arr = p1.toArray();
-                List<Point> goodNewList = new ArrayList<>();
+                goodNewList = new ArrayList<>();
+                List<Point> goodOldList = new ArrayList<>();
 
                 for (int i = 0; i < statusArr.length; i++) {
                     if (statusArr[i] == 1) { // 1 means point was successfully tracked (yippee)
-                        goodNewList.add(p1Arr[i]);
+                        if (p1Arr[i].x > X_START && p1Arr[i].x < X_END && p1Arr[i].y > Y_START && p1Arr[i].y < Y_END) { // Point is within Head Height Box
+                            goodNewList.add(p1Arr[i]);
+                            goodOldList.add(p0.toArray()[i]); // "Keep" the original point if the new point is good
+                        }
 
                         // Draw a circle on the display frame - from lab2
-                        Scalar color = colors[i % 100];
+                        Scalar color = colors[i % 50];
                         Imgproc.circle(displayMat, p1Arr[i], 5, color, -1);
                     }
                 }
+
+                // Divergence Logic
+                checkLucasCollision(goodOldList, goodNewList);
 
                 // Update state for the next frame
                 oldGray.release();
@@ -255,7 +605,7 @@ public class StartIsoStreamActivityUvc extends Activity {
                 } else {
                     // If lost too many points, find new ones
                     MatOfPoint corners = new MatOfPoint();
-                    Imgproc.goodFeaturesToTrack(oldGray, corners, 100, 0.3, 7);
+                    Imgproc.goodFeaturesToTrack(oldGray, corners, 50, 0.3, 7);
                     corners.convertTo(p0, CvType.CV_32F);
                     corners.release();
                 }
@@ -285,6 +635,43 @@ public class StartIsoStreamActivityUvc extends Activity {
         }
     }
 
+    private void checkLucasCollision(List<Point> oldPoints, List<Point> newPoints) {
+        if (oldPoints.size() < 2 || newPoints.size() < 2) {
+            return;
+        }
+
+        double oldDistSum = 0;
+        double newDistSum = 0;
+        int count = 0;
+
+        // S = Average Distance Between Points (Current) / Average Distance Between Points (Previous)
+        // If points are getting closer, then: S > 1 (Divergence)
+
+        for (int i = 0; i < oldPoints.size() - 1; i++) {
+            Point old1 = oldPoints.get(i);
+            Point old2 = oldPoints.get(i + 1);
+            Point new1 = newPoints.get(i);
+            Point new2 = newPoints.get(i + 1);
+
+            oldDistSum += Math.hypot(old1.x - old2.x, old1.y - old2.y);
+            newDistSum += Math.hypot(new1.x - new2.x, new1.y - new2.y);
+            count++;
+        }
+
+        double avgOldDist = oldDistSum / count;
+        double avgNewDist = newDistSum / count;
+
+        // Divergence ratio: > 1
+        double divergence = avgNewDist / avgOldDist;
+        Log.d("BETABANS", "Divergence: " + divergence);
+
+        if (divergence > 1.4) {
+            triggerVibration(200);
+        } else if (divergence > 1.05) {
+            triggerVibration(1);
+        }
+    }
+
 
     //endregion
 
@@ -307,9 +694,6 @@ public class StartIsoStreamActivityUvc extends Activity {
     private Bitmap mInputBitmap;
     private Bitmap mResizedBitmap;
     private byte[] midasBuffr;
-
-    private final LinkedList<Float> depthHistory = new LinkedList<>();
-    private final int MAX_HISTORY_SIZE = 2;
 
     // Bounding Box
     int Y_START = 0;
@@ -343,7 +727,7 @@ public class StartIsoStreamActivityUvc extends Activity {
     }
 
     private java.nio.ByteBuffer convertBitmapToByteBuffer(Bitmap bitmap) {
-        Log.i("BETABANS_DEBUG", "convertBitmapToByteBuffer");
+//        Log.i("BETABANS_DEBUG", "convertBitmapToByteBuffer");
         // MiDaS-V2.1 = 256x256 | 4 bytes per float, 3 channels (RGB)
         java.nio.ByteBuffer byteBuffer = java.nio.ByteBuffer.allocateDirect(4 * 256 * 256 * 3);
         byteBuffer.order(java.nio.ByteOrder.nativeOrder());
@@ -352,7 +736,7 @@ public class StartIsoStreamActivityUvc extends Activity {
         bitmap.getPixels(intValues, 0, bitmap.getWidth(), 0, 0, bitmap.getWidth(), bitmap.getHeight());
 
         int firstPixel = intValues[0];
-        Log.d("BETABANS_DEBUG", "DEBUG | First Pixel Hex: " + Integer.toHexString(firstPixel));
+//        Log.d("BETABANS_DEBUG", "DEBUG | First Pixel Hex: " + Integer.toHexString(firstPixel));
 
         byteBuffer.rewind();
         for (int pixelValue : intValues) {
@@ -665,7 +1049,7 @@ public class StartIsoStreamActivityUvc extends Activity {
     //endregion
 
 
-
+    //region OG CODE
 
     private final BroadcastReceiver mUsbReceiver = new BroadcastReceiver() {
         public void onReceive(Context context, Intent intent) {
@@ -692,23 +1076,10 @@ public class StartIsoStreamActivityUvc extends Activity {
         super.onStart();
         Log.v("STATE", "onStart() is called");
 
-        if (MiDAS_IMPLEMENTATION) {
+        /*if (MiDAS_IMPLEMENTATION)*/ {
             setupAiThread();
             initMidas();
         }
-    }
-
-    private void quickStartGC0307() {
-        // Hardcoded working values for the GC0307 sensor
-        this.imageWidth = 640;
-        this.imageHeight = 480;
-        this.videoformat = "YUY2";
-        this.camFormatIndex = 1;
-        this.camFrameIndex = 1;
-        this.camFrameInterval = 333333; // 30 FPS
-
-        // Start the stream
-        isoStream(null);
     }
 
     @Override
@@ -767,14 +1138,15 @@ public class StartIsoStreamActivityUvc extends Activity {
                         | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
                         | View.KEEP_SCREEN_ON);
         imageView = (ImageView) findViewById(R.id.imageView);
-        // BETABANS /~~
+
+        /// BETABANS /~~
 
         algorithmView = (ImageView) findViewById(R.id.algorithmView);
 
-        if (MiDAS_IMPLEMENTATION) {
+        /*if (MiDAS_IMPLEMENTATION) */ {
             // MiDas
             midasDepthValue = (TextView) findViewById(R.id.midasDepthValue);
-        } else {
+//        } else {
             // Lucas-Kanade
             if (!org.opencv.android.OpenCVLoader.initDebug()) {
                 Log.e("BETABANS", "Unable to load OpenCV");
@@ -788,7 +1160,7 @@ public class StartIsoStreamActivityUvc extends Activity {
             }
         }
 
-        // BETABANS ~~/
+        /// BETABANS ~~/
 
         // Start onClick Listener method
         startStream = (Button) findViewById(R.id.startStream);
@@ -2958,3 +3330,5 @@ public void lowerResolutionClickButtonEvent () {
 
 
  */
+
+    //endregion
