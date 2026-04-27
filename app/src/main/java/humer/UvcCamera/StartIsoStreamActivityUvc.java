@@ -135,7 +135,7 @@ public class StartIsoStreamActivityUvc extends Activity {
     float[][][][] latestDepthMap;
     float latestAvgDepth;
     private final LinkedList<Float> depthHistory = new LinkedList<>();
-    private final int MAX_HISTORY_SIZE = 2;
+    private final int MAX_HISTORY_SIZE = 5;
     Bitmap sideScreenBitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888);
     int[] pixelsBuffer = new int[256 * 256];
 
@@ -190,8 +190,7 @@ public class StartIsoStreamActivityUvc extends Activity {
     private void checkCollisionWithDepth(List<Point> oldPoints, List<Point> newPoints) {
         if (oldPoints.size() < 2 || newPoints.size() < 2) return;
 
-        double oldDistSum = 0;
-        double newDistSum = 0;
+        double totalDivergence = 0;
         int validPointCount = 0;
 
         for (int i = 0; i < oldPoints.size() - 1; i++) {
@@ -200,11 +199,28 @@ public class StartIsoStreamActivityUvc extends Activity {
             Point n2 = newPoints.get(i + 1);
             Point o2 = oldPoints.get(i + 1);
 
-            // Indv. Divergence
-            // Do this to add points if they have a high divergence inside the bounding box
-            double distOld = Math.hypot(o1.x - o2.x, o1.y - o2.y);
-            double distNew = Math.hypot(n1.x - n2.x, n1.y - n2.y);
-            double individualDiv = (distOld > 0) ? (distNew / distOld) : 1.0;
+            ///  Divergence Calculation from
+            ///  Coombs, D., Herman, M., Hong, T. H., & Nashman, M. (1998).
+            /// Real-time obstacle avoidance using central flow divergence, and peripheral flow.
+            /// IEEE Transactions on Robotics and Automation, 14(1), 49–59. https://doi.org/10.1109/70.660840
+
+            // Velocity Components (u, v) for two neighboring points
+            double u1 = n1.x - o1.x; // horizontal velocity of point 1
+            double v1 = n1.y - o1.y; // vertical velocity of point 1
+            double u2 = n2.x - o2.x; // horizontal velocity of point 2
+            double v2 = n2.y - o2.y; // vertical velocity of point 2
+
+            // Approximate Spatial Derivatives
+            // du/dx: change in horizontal velocity over horizontal distance
+            double dx = Math.max(0.1, Math.abs(o1.x - o2.x));
+            double dy = Math.max(0.1, Math.abs(o1.y - o2.y));
+
+            double du_dx = (u1 - u2) / dx;
+            double dv_dy = (v1 - v2) / dy;
+
+            double localDiv = du_dx + dv_dy;
+
+            if (localDiv < 0.1) localDiv = 0;
 
             // Map the LK point (640x480) to MiDaS space (256x256)
             int midasX = (int) (n1.x * (256.0 / 640.0));
@@ -214,31 +230,31 @@ public class StartIsoStreamActivityUvc extends Activity {
             if (midasX >= 0 && midasX < 256 && midasY >= 0 && midasY < 256) {
                 float depthValue = latestDepthMap[0][midasX][midasY][0];
 
-//                Log.d("BETABANS", "Depth Value: " + depthValue);
-
-                // Only consider points that r "somewhat close"
-                // AND
-                // points if they are LOOMING (divergence)
-                if (depthValue > 0.05f || individualDiv > 1.5) {
-                    oldDistSum += distOld;
-                    newDistSum += individualDiv;
+                // Use the Vector Calculus divergence value
+                if (depthValue > 0.05f || localDiv > 0.8) {
+                    totalDivergence += localDiv;
                     validPointCount++;
                 }
             }
         }
 
         if (validPointCount > 0) {
-            double avgOldDist = oldDistSum / validPointCount;
-            double avgNewDist = newDistSum / validPointCount;
-            double divergence = avgNewDist / avgOldDist;
+            double averageDivergence = totalDivergence / validPointCount;
 
-            // Final Trigger: High divergence + verified proximity
-//            Log.d("BETABANS", "Divergence: " + divergence);
-            if (divergence > 1.5) {
+            // Final Trigger: High averageDivergence + verified proximity
+            Log.d("BETABANS", "Divergence: " + averageDivergence);
+
+            if (averageDivergence > 2) {
                 triggerVibration(200);
-            } else if (divergence > 1.05) {
+            } else if (averageDivergence > 1) {
                 triggerVibration(10);
             }
+
+            // TIME-TO-COLLISION
+            // Tau Theory : tau = The change in angular size of the object / The rate of expansion
+            // Time To Collision (s) = 1 / averageDivergence
+            Log.i("BETABANS", "Time-to-Collision: " + (1 / averageDivergence));
+
         } else {
             Log.i("BETABANS", "NO VALID POINTS");
         }
@@ -297,7 +313,16 @@ public class StartIsoStreamActivityUvc extends Activity {
         // Resize for Model Input (256x256)
         android.graphics.Canvas canvas = new android.graphics.Canvas(mResizedBitmap);
         android.graphics.Matrix matrix = new android.graphics.Matrix();
-        matrix.setScale(256f / imageWidth, 256f / imageHeight);
+
+        float squareSize = imageHeight;
+        float leftOffset = (imageHeight - squareSize) / 2f;
+
+        matrix.postTranslate(-leftOffset, 0);
+
+        float scale = 256f / squareSize;
+        matrix.postScale(scale, scale);
+
+//        matrix.setScale(256f / imageWidth, 256f / imageHeight);
         canvas.drawBitmap(mInputBitmap, matrix, null);
 
         // Prepare Buffer and Run Inference
@@ -479,7 +504,7 @@ public class StartIsoStreamActivityUvc extends Activity {
                 oldGray.release();
                 oldGray = currentGray.clone();
 
-                if (goodNewList.size() > 10) {
+                if (goodNewList.size() > 5) {
                     p0.fromList(goodNewList);
                 } else {
                     // If lost too many points, find new ones
